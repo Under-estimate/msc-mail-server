@@ -18,12 +18,33 @@ sql_save = "INSERT INTO MAILS(uid,sender,receiver,create_time,content) VALUES (U
 
 re_email = re.compile(r'^[a-zA-Z\.]+@[a-zA-Z0-9]+\.[a-zA-Z]{3}$')
 
+
 class Myserver(socketserver.BaseRequestHandler):
 
     def get_time(self):
         ticks = time.time()
         localtime = time.localtime(time.time())
         return time.strftime("%a ,%d %b %Y %H:%M:%S %z", time.localtime())
+
+    def is_base64_code(self, s):
+        '''Check s is Base64.b64encode'''
+        if not isinstance(s, str) or not s:
+            return 0
+
+        _base64_code = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I',
+                        'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
+                        'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a',
+                        'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
+                        'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+                        't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1',
+                        '2', '3', '4', '5', '6', '7', '8', '9', '+',
+                        '/', '=']
+
+        # Check base64 OR codeCheck % 4
+        code_fail = [i for i in s if i not in _base64_code]
+        if code_fail or len(s) % 4 != 0:
+            return 1
+        return 2
 
     def recv_endswith(self, End):
         total_data = []
@@ -73,22 +94,28 @@ class Myserver(socketserver.BaseRequestHandler):
 
     def check_existence(self, user_addr):
         if user_addr.endswith(self.server_domain):
+            user_addr=user_addr.replace("@msc.com", "")
             data_tuple = (user_addr,)
             try:
                 cursor.execute(sql_query, data_tuple)
                 results = cursor.fetchall()
                 for row in results:
+                    self.request.sendall(b'250 OK\r\n')
                     return True
 
             except Exception as e:
                 print(str(e))
+                self.request.sendall(b'503 server error,please wait and try latter\r\n')
                 return False
                 pass
+            self.request.sendall(b'503 the inside user is not exist\r\n')
             return False
         else:
             if re_email.match(user_addr):
+                self.request.sendall(b'250 OK\r\n')
                 return True
             else:
+                self.request.sendall(b'503 the receiver is invalid\r\n')
                 return False
 
     def check_user(self):
@@ -230,20 +257,25 @@ class Myserver(socketserver.BaseRequestHandler):
             elif self.data.upper() == "AUTH LOGIN":
 
                 self.request.sendall(b'334 VXNlcm5hbWU6\r\n')
-                self.data = self.recv_endswith("\r\n").strip()
-                self.client_name = base64.b64decode(self.data).decode("utf-8")
-                self.client_name = self.client_name.replace("@msc.com", "")
-
+                self.client_name = self.recv_endswith("\r\n").strip()
                 self.request.sendall(b'334 UGFzc3dvcmQ6\r\n')
-                self.data = self.recv_endswith("\r\n").strip()
-                self.client_pass = hashlib.md5(base64.b64decode(self.data)).hexdigest()
+                self.client_pass = self.recv_endswith("\r\n").strip()
 
-                self.check_user()
-
-                if self.client_type == 2:
-                    self.request.sendall(b'235 Authentication successful\r\n')
+                if self.is_base64_code(self.client_name) == 0 or self.is_base64_code(self.client_pass) == 0:
+                    self.request.sendall(b'503 please keep the information not none\r\n')
+                elif self.is_base64_code(self.client_name) == 1 or self.is_base64_code(self.client_pass) == 1:
+                    self.request.sendall(b'503 please keep the information is base64 code\r\n')
                 else:
-                    self.request.sendall(b'535 Login Fail. Please enter right information to login.\r\n')
+                    self.client_name = base64.b64decode(self.client_name).decode("utf-8")
+                    self.client_name = self.client_name.replace("@msc.com", "")
+                    self.client_pass = hashlib.md5(base64.b64decode(self.client_pass)).hexdigest()
+
+                    self.check_user()
+
+                    if self.client_type == 2:
+                        self.request.sendall(b'235 Authentication successful\r\n')
+                    else:
+                        self.request.sendall(b'535 Login Fail. Please enter right information to login.\r\n')
 
             elif (self.data[0:11] + self.data[-1]).upper() == "MAIL FROM:<>":
                 if self.client_type != 0:
@@ -259,10 +291,7 @@ class Myserver(socketserver.BaseRequestHandler):
                 if self.process_turn >= 1:
                     if self.check_existence(self.data[9:-1]):
                         self.receiver_list.append(self.data[9:-1])
-                        self.request.sendall(b'250 OK\r\n')
                         self.process_turn = 2
-                    else:
-                        self.request.sendall(b'551 User not exist; please try again')
                 else:
                     self.request.sendall(b'503 Send command mailfrom first.\r\n')
 

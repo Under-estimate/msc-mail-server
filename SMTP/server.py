@@ -16,7 +16,9 @@ cursor = db.cursor()
 sql_query = "SELECT * FROM users WHERE username = %s"
 sql_save = "INSERT INTO MAILS(uid,sender,receiver,create_time,content) VALUES (UUID(), %s, %s, now(), %s)"
 
-re_email = re.compile(r'^[a-zA-Z\.]+@[a-zA-Z0-9]+\.[a-zA-Z]{3}$')
+re_email = re.compile(r'[\w.-]+@(\w+)(\.\w+)+')
+re_ipv4 = re.compile(r'[0-9]+(\.[0-9]+)+')
+re_ipv6 = re.compile(r'\w+(:\w+)+')
 
 
 class Myserver(socketserver.BaseRequestHandler):
@@ -65,21 +67,28 @@ class Myserver(socketserver.BaseRequestHandler):
         return ("".join(total_data)).replace(End, '')
 
     def check_ip_list(self):  # 获取域名解析出的IP列表
-        ip_list = []
-        self.domain.encode("utf-8")
         if len(self.domain) <= 1:
             self.request.sendall(b'502 please enter domain\r\n')
             return
 
-        try:
-            addrs = socket.getaddrinfo(self.domain, None)
-            for item in addrs:
-                if item[4][0] not in ip_list:
-                    ip_list.append(item[4][0])
-        except Exception as e:
-            print(str(e))
-            self.request.sendall(b'502 Invalid domain,getaddrinfo failed\r\n')
-            return
+        ip_list = []
+        if re_ipv4.match(self.domain):
+            if self.domain == self.client_address:
+                self.client_type = 1
+        elif re_ipv6.match(self.domain):
+            if self.domain == self.client_address:
+                self.client_type = 1
+        else:
+            self.domain.encode("utf-8")
+            try:
+                addrs = socket.getaddrinfo(self.domain, None)
+                for item in addrs:
+                    if item[4][0] not in ip_list:
+                        ip_list.append(item[4][0])
+            except Exception as e:
+                print(str(e))
+                self.request.sendall(b'502 Invalid domain,getaddrinfo failed\r\n')
+                return
 
         self.request.sendall(b'''250-msc.com
 250-SIZE 73400320
@@ -93,8 +102,8 @@ class Myserver(socketserver.BaseRequestHandler):
                 return
 
     def check_existence(self, user_addr):
-        if user_addr.endswith(self.server_domain):
-            user_addr=user_addr.replace("@msc.com", "")
+        if user_addr.endswith("@msc.com"):
+            user_addr = user_addr.replace("@msc.com", "")
             data_tuple = (user_addr,)
             try:
                 cursor.execute(sql_query, data_tuple)
@@ -162,17 +171,22 @@ class Myserver(socketserver.BaseRequestHandler):
                + "> ; " + self.get_time() \
                + "\n" + cont
 
+        try:
+            rec_doamin = "smtp." + rec[rec.find("@") + 1:]
+            self.receiver_ip = socket.getaddrinfo(rec_doamin, None)[0][4][0]
+        except Exception as e:
+            print(e)
+            self.save_mail(self.server_user, sender, self.create_mail(sender, "503 the receiver can't find"))
+            return
         tcpclient = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcpclient.connect((self.client_ip, 25))
+        tcpclient.connect((self.receiver_ip, 25))
         ret = self.recv_endswith("\r\n").strip()
-
         dat = "EHLO " + self.server_domain + "\r\n"
         tcpclient.send(dat.encode('utf-8'))
         ret = self.recv_endswith("\r\n.\r\n").strip()
         if ret[0] == '5':
             self.save_mail(self.server_user, sender, self.create_mail(sender, ret))
             return
-
         dat = "MAIL FROM:<" + sender + ">\r\n"
         tcpclient.send(dat.encode('utf-8'))
         ret = self.recv_endswith("\r\n").strip()
@@ -212,7 +226,7 @@ class Myserver(socketserver.BaseRequestHandler):
 
     def solve_work(self, work):
         for rec in work[1]:
-            if rec.endswith(self.server_domain):
+            if rec.endswith("@msc.com"):
                 self.save_mail(work[0], rec, work[2])
             else:
                 self.send_mail(work[0], rec, work[2])
@@ -234,85 +248,92 @@ class Myserver(socketserver.BaseRequestHandler):
         self.one_work = []
 
         while True:
-            self.data = self.recv_endswith("\r\n").strip()
-            if self.data.upper() == "QUIT":
-                for work in self.total_works:
-                    self.solve_work(work)
-                self.request.sendall(b'221 Bye\r\n')
-                return
+            try:
+                self.data = self.recv_endswith("\r\n").strip()
+                if self.data.upper() == "QUIT":
+                    for work in self.total_works:
+                        self.solve_work(work)
+                    self.request.sendall(b'221 Bye\r\n')
+                    return
 
-            elif self.data.upper() == "NOOP":
-                self.request.sendall(noop_msg.encode())
+                elif self.data.upper() == "NOOP":
+                    self.request.sendall(noop_msg.encode())
 
-            elif self.data.upper() == "RSET":
+                elif self.data.upper() == "RSET":
+                    self.total_works = ()
+                    self.process_turn = 0
+                    self.client_type = 0
+                    self.request.sendall(b'250 OK\r\n')
+
+                elif self.data[0:4].upper() == "EHLO":
+                    self.domain = self.data[5:]
+                    self.check_ip_list()
+
+                elif self.data.upper() == "AUTH LOGIN":
+
+                    self.request.sendall(b'334 VXNlcm5hbWU6\r\n')
+                    self.client_name = self.recv_endswith("\r\n").strip()
+                    self.request.sendall(b'334 UGFzc3dvcmQ6\r\n')
+                    self.client_pass = self.recv_endswith("\r\n").strip()
+
+                    if self.is_base64_code(self.client_name) == 0 or self.is_base64_code(self.client_pass) == 0:
+                        self.request.sendall(b'503 please keep the information not none\r\n')
+                    elif self.is_base64_code(self.client_name) == 1 or self.is_base64_code(self.client_pass) == 1:
+                        self.request.sendall(b'503 please keep the information is base64 code\r\n')
+                    else:
+                        self.client_name = base64.b64decode(self.client_name).decode("utf-8")
+                        self.client_name = self.client_name.replace("@msc.com", "")
+                        self.client_pass = hashlib.md5(base64.b64decode(self.client_pass)).hexdigest()
+
+                        self.check_user()
+
+                        if self.client_type == 2:
+                            self.request.sendall(b'235 Authentication successful\r\n')
+                        else:
+                            self.request.sendall(b'535 Login Fail. Please enter right information to login.\r\n')
+
+                elif (self.data[0:11] + self.data[-1]).upper() == "MAIL FROM:<>":
+                    if self.client_type != 0:
+                        self.one_work = []
+                        self.sender_addr = self.data[11:-1]
+                        self.receiver_list = []
+                        self.request.sendall(b'250 OK\r\n')
+                        self.process_turn = 1
+                    else:
+                        self.request.sendall(b'503 Send command HELO/EHLO first.\r\n')
+
+                elif (self.data[0:9] + self.data[-1]).upper() == "RCPT TO:<>":
+                    if self.process_turn >= 1:
+                        if self.check_existence(self.data[9:-1]):
+                            self.receiver_list.append(self.data[9:-1])
+                            self.process_turn = 2
+                    else:
+                        self.request.sendall(b'503 Send command mailfrom first.\r\n')
+
+                elif self.data.upper() == "DATA":
+                    if self.process_turn == 2:
+                        self.request.sendall(b'354 End data with <CR><LF>.<CR><LF>.\r\n')
+                        self.content = self.recv_endswith("\r\n.\r\n").strip()
+                        if len(self.content) <= 73400320:
+                            self.one_work.append(self.sender_addr)
+                            self.one_work.append(self.receiver_list)
+                            self.one_work.append(self.content)
+                            self.total_works.append(self.one_work)
+                            self.process_turn = 0
+                            self.request.sendall(b'250 OK:queued as.\r\n')
+                        else:
+                            self.request.sendall(b'503 Content is too long.\r\n')
+                    else:
+                        self.request.sendall(b'503 Send command rcptto first.\r\n')
+
+                else:
+                    self.request.sendall(error_msg.encode())
+            except ConnectionResetError as e:
                 self.total_works = ()
                 self.process_turn = 0
                 self.client_type = 0
-                self.request.sendall(b'250 OK\r\n')
-
-            elif self.data[0:4].upper() == "EHLO":
-                self.domain = self.data[5:]
-                self.check_ip_list()
-
-            elif self.data.upper() == "AUTH LOGIN":
-
-                self.request.sendall(b'334 VXNlcm5hbWU6\r\n')
-                self.client_name = self.recv_endswith("\r\n").strip()
-                self.request.sendall(b'334 UGFzc3dvcmQ6\r\n')
-                self.client_pass = self.recv_endswith("\r\n").strip()
-
-                if self.is_base64_code(self.client_name) == 0 or self.is_base64_code(self.client_pass) == 0:
-                    self.request.sendall(b'503 please keep the information not none\r\n')
-                elif self.is_base64_code(self.client_name) == 1 or self.is_base64_code(self.client_pass) == 1:
-                    self.request.sendall(b'503 please keep the information is base64 code\r\n')
-                else:
-                    self.client_name = base64.b64decode(self.client_name).decode("utf-8")
-                    self.client_name = self.client_name.replace("@msc.com", "")
-                    self.client_pass = hashlib.md5(base64.b64decode(self.client_pass)).hexdigest()
-
-                    self.check_user()
-
-                    if self.client_type == 2:
-                        self.request.sendall(b'235 Authentication successful\r\n')
-                    else:
-                        self.request.sendall(b'535 Login Fail. Please enter right information to login.\r\n')
-
-            elif (self.data[0:11] + self.data[-1]).upper() == "MAIL FROM:<>":
-                if self.client_type != 0:
-                    self.one_work = []
-                    self.sender_addr = self.data[11:-1]
-                    self.receiver_list = []
-                    self.request.sendall(b'250 OK\r\n')
-                    self.process_turn = 1
-                else:
-                    self.request.sendall(b'503 Send command HELO/EHLO first.\r\n')
-
-            elif (self.data[0:9] + self.data[-1]).upper() == "RCPT TO:<>":
-                if self.process_turn >= 1:
-                    if self.check_existence(self.data[9:-1]):
-                        self.receiver_list.append(self.data[9:-1])
-                        self.process_turn = 2
-                else:
-                    self.request.sendall(b'503 Send command mailfrom first.\r\n')
-
-            elif self.data.upper() == "DATA":
-                if self.process_turn == 2:
-                    self.request.sendall(b'354 End data with <CR><LF>.<CR><LF>.\r\n')
-                    self.content = self.recv_endswith("\r\n.\r\n").strip()
-                    if len(self.content) <= 73400320:
-                        self.one_work.append(self.sender_addr)
-                        self.one_work.append(self.receiver_list)
-                        self.one_work.append(self.content)
-                        self.total_works.append(self.one_work)
-                        self.process_turn = 0
-                        self.request.sendall(b'250 OK:queued as.\r\n')
-                    else:
-                        self.request.sendall(b'503 Content is too long.\r\n')
-                else:
-                    self.request.sendall(b'503 Send command rcptto first.\r\n')
-
-            else:
-                self.request.sendall(error_msg.encode())
+                print("连接断开", e)
+                break
 
 
 if __name__ == "__main__":

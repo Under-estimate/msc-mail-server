@@ -66,17 +66,17 @@ class Myserver(socketserver.BaseRequestHandler):
                     break
         return ("".join(total_data)).replace(End, '')
 
-    def check_ip_list(self):  # 获取域名解析出的IP列表
+    def check_ip_list(self, check_flag):  # 获取域名解析出的IP列表
         if len(self.domain) <= 1:
             self.request.sendall(b'502 please enter domain\r\n')
             return
 
         ip_list = []
-        if re_ipv4.match(self.domain):
-            if self.domain == self.client_address:
+        if re_ipv4.match(self.domain[1: -1]):
+            if self.domain[1:-1] == self.client_address:
                 self.client_type = 1
-        elif re_ipv6.match(self.domain):
-            if self.domain == self.client_address:
+        elif re_ipv6.match(self.domain[1: -1]):
+            if self.domain[1:-1] == self.client_address:
                 self.client_type = 1
         else:
             self.domain.encode("utf-8")
@@ -89,12 +89,14 @@ class Myserver(socketserver.BaseRequestHandler):
                 print(str(e))
                 self.request.sendall(b'502 Invalid domain,getaddrinfo failed\r\n')
                 return
-
-        self.request.sendall(b'''250-msc.com
+        if check_flag:
+            self.request.sendall(b'''250-msc.com
 250-SIZE 73400320
 250-AUTH LOGIN 
 250-AUTH=LOGIN
-250 8BITMIME\r\n.\r\n''')
+250 8BITMIME\r\n''')
+        else:
+            self.request.sendall(b'250 Msc.com')
 
         for ip in ip_list:
             if ip == self.client_ip:
@@ -183,7 +185,7 @@ class Myserver(socketserver.BaseRequestHandler):
         ret = self.recv_endswith("\r\n").strip()
         dat = "EHLO " + self.server_domain + "\r\n"
         tcpclient.send(dat.encode('utf-8'))
-        ret = self.recv_endswith("\r\n.\r\n").strip()
+        ret = self.recv_endswith("\r\n").strip()
         if ret[0] == '5':
             self.save_mail(self.server_user, sender, self.create_mail(sender, ret))
             return
@@ -267,8 +269,10 @@ class Myserver(socketserver.BaseRequestHandler):
 
                 elif self.data[0:4].upper() == "EHLO":
                     self.domain = self.data[5:]
-                    self.check_ip_list()
-
+                    self.check_ip_list(True)
+                elif self.data[0:4].upper() == "HELO":
+                    self.domain = self.data[5:]
+                    self.check_ip_list(False)
                 elif self.data.upper() == "AUTH LOGIN":
 
                     self.request.sendall(b'334 VXNlcm5hbWU6\r\n')
@@ -291,21 +295,41 @@ class Myserver(socketserver.BaseRequestHandler):
                             self.request.sendall(b'235 Authentication successful\r\n')
                         else:
                             self.request.sendall(b'535 Login Fail. Please enter right information to login.\r\n')
+                elif self.data[0:10].upper() == "AUTH LOGIN":
+                    self.client_name = self.data[11:]
+                    self.request.sendall(b'334 UGFzc3dvcmQ6\r\n')
+                    self.client_pass = self.recv_endswith("\r\n").strip()
 
-                elif (self.data[0:11] + self.data[-1]).upper() == "MAIL FROM:<>":
+                    if self.is_base64_code(self.client_name) == 0 or self.is_base64_code(self.client_pass) == 0:
+                        self.request.sendall(b'503 please keep the information not none\r\n')
+                    elif self.is_base64_code(self.client_name) == 1 or self.is_base64_code(self.client_pass) == 1:
+                        self.request.sendall(b'503 please keep the information is base64 code\r\n')
+                    else:
+                        self.client_name = base64.b64decode(self.client_name).decode("utf-8")
+                        self.client_name = self.client_name.replace("@msc.com", "")
+                        self.client_pass = hashlib.md5(base64.b64decode(self.client_pass)).hexdigest()
+
+                        self.check_user()
+
+                        if self.client_type == 2:
+                            self.request.sendall(b'235 Authentication successful\r\n')
+                        else:
+                            self.request.sendall(b'535 Login Fail. Please enter right information to login.\r\n')
+
+                elif self.data[0:11].upper() == "MAIL FROM:<" and self.data.find(">") != -1:
                     if self.client_type != 0:
                         self.one_work = []
-                        self.sender_addr = self.data[11:-1]
+                        self.sender_addr = self.data[11:self.data.find(">")]
                         self.receiver_list = []
                         self.request.sendall(b'250 OK\r\n')
                         self.process_turn = 1
                     else:
                         self.request.sendall(b'503 Send command HELO/EHLO first.\r\n')
 
-                elif (self.data[0:9] + self.data[-1]).upper() == "RCPT TO:<>":
+                elif self.data[0:9].upper() == "RCPT TO:<" and self.data.find(">") != -1:
                     if self.process_turn >= 1:
-                        if self.check_existence(self.data[9:-1]):
-                            self.receiver_list.append(self.data[9:-1])
+                        if self.check_existence(self.data[9:self.data.find(">")]):
+                            self.receiver_list.append(self.data[9:self.data.find(">")])
                             self.process_turn = 2
                     else:
                         self.request.sendall(b'503 Send command mailfrom first.\r\n')
